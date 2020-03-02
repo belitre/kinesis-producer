@@ -128,6 +128,9 @@ func (p *Producer) NotifyFailures() <-chan *FailureRecord {
 
 // Start the producer
 func (p *Producer) Start() {
+	p.done = make(chan struct{})
+	p.records = make(chan *kinesis.PutRecordsRequestEntry, p.Config.BacklogCount)
+	p.semaphore = make(chan struct{}, p.Config.MaxConnections)
 	p.Logger.Info("starting producer", LogValue{"stream", p.StreamName})
 	go p.loop()
 }
@@ -169,6 +172,7 @@ func (p *Producer) loop() {
 	flush := func(msg string) {
 		p.semaphore.acquire()
 		go p.flush(buf, msg)
+		p.Logger.Info("finish flush")
 		buf = nil
 		size = 0
 	}
@@ -196,6 +200,7 @@ func (p *Producer) loop() {
 			if drain && !ok {
 				if size > 0 {
 					flush("drain")
+					p.Logger.Info("finish drain")
 				}
 				p.Logger.Info("backlog drained")
 				return
@@ -250,8 +255,11 @@ func (p *Producer) flush(records []*kinesis.PutRecordsRequestEntry, reason strin
 
 		if err != nil {
 			p.Logger.Error("flush", err)
+			p.Logger.Info("before lock in flush")
 			p.RLock()
+			p.Logger.Info("after lock in flush")
 			notify := p.notify
+			p.Logger.Info("after notify in flush")
 			p.RUnlock()
 			if notify {
 				p.dispatchFailures(records, err)
@@ -296,11 +304,16 @@ func (p *Producer) flush(records []*kinesis.PutRecordsRequestEntry, reason strin
 // dispatchFailures gets batch of records, extract them, and push them
 // into the failure channel
 func (p *Producer) dispatchFailures(records []*kinesis.PutRecordsRequestEntry, err error) {
+	p.Logger.Info("dispatchFailures")
+
 	for _, r := range records {
 		if isAggregated(r) {
+			p.Logger.Info("dispatchFailures isAggregated")
 			p.dispatchFailures(extractRecords(r), err)
 		} else {
+			p.Logger.Info("dispatchFailures before channel")
 			p.failure <- &FailureRecord{err, r.Data, *r.PartitionKey}
+			p.Logger.Info("dispatchFailures before channel")
 		}
 	}
 }
